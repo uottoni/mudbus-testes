@@ -1,0 +1,319 @@
+zabbix_export:
+  version: '6.4'
+  template_groups:
+    - uuid: a571c0d144b14fd9b68af1bda0568121
+      name: 'Templates/Power'
+  templates:
+    - uuid: b8d91c2f5d8e4a4a9c3f7e2b1a0d6c4e
+      template: 'Battery UPLFP48100 Modbus'
+      name: 'Battery UPLFP48100 Modbus'
+      description: |
+        Template para monitoramento de baterias UPLFP48100 via Modbus RTU
+        
+        Requer:
+        - Script battery_zabbix.py em /usr/local/bin/
+        - Configuração UserParameter no Zabbix Agent 2
+        - Python 3 com pymodbus instalado
+        
+        Versão: 1.0
+        Data: 2026-01-27
+      groups:
+        - name: 'Templates/Power'
+      discovery_rules:
+        - uuid: f3a7b9c2e5d14a2b8c6f9e1d0a4b7c3e
+          name: 'Battery Discovery'
+          type: ZABBIX_ACTIVE
+          key: battery.discover
+          delay: 1h
+          description: 'Descobre baterias UPLFP48100 conectadas via Modbus (IDs 1-16)'
+          item_prototypes:
+            - uuid: d2c4e6f8a1b3d5e7c9f1a3b5d7e9f1a3
+              name: 'Battery {#BATTERY_ID}: Voltage'
+              type: ZABBIX_ACTIVE
+              key: 'battery.metric[{#BATTERY_ID},voltage]'
+              delay: 1m
+              value_type: FLOAT
+              units: V
+              description: 'Tensão total da bateria (soma das células)'
+              tags:
+                - tag: Application
+                  value: 'Battery {#BATTERY_ID}'
+                - tag: Component
+                  value: Electrical
+            
+            - uuid: e3d5f7a9b1c3e5f7a9b1c3e5f7a9b1c3
+              name: 'Battery {#BATTERY_ID}: Current'
+              type: ZABBIX_ACTIVE
+              key: 'battery.metric[{#BATTERY_ID},current]'
+              delay: 1m
+              value_type: FLOAT
+              units: A
+              description: 'Corrente da bateria (positivo = carga, negativo = descarga)'
+              tags:
+                - tag: Application
+                  value: 'Battery {#BATTERY_ID}'
+                - tag: Component
+                  value: Electrical
+            
+            - uuid: f4e6a8b0c2d4e6f8a0b2c4d6e8f0a2b4
+              name: 'Battery {#BATTERY_ID}: Power'
+              type: ZABBIX_ACTIVE
+              key: 'battery.metric[{#BATTERY_ID},power]'
+              delay: 1m
+              value_type: FLOAT
+              units: W
+              description: 'Potência instantânea da bateria'
+              tags:
+                - tag: Application
+                  value: 'Battery {#BATTERY_ID}'
+                - tag: Component
+                  value: Electrical
+            
+            - uuid: a5b7c9d1e3f5a7b9c1d3e5f7a9b1c3d5
+              name: 'Battery {#BATTERY_ID}: State of Charge (SOC)'
+              type: ZABBIX_ACTIVE
+              key: 'battery.metric[{#BATTERY_ID},soc]'
+              delay: 1m
+              value_type: FLOAT
+              units: '%'
+              description: 'Estado de carga da bateria (0-100%)'
+              tags:
+                - tag: Application
+                  value: 'Battery {#BATTERY_ID}'
+                - tag: Component
+                  value: State
+            
+            - uuid: b6c8d0e2f4a6b8c0d2e4f6a8b0c2d4e6
+              name: 'Battery {#BATTERY_ID}: State of Health (SOH)'
+              type: ZABBIX_ACTIVE
+              key: 'battery.metric[{#BATTERY_ID},soh]'
+              delay: 1m
+              value_type: FLOAT
+              units: '%'
+              description: 'Estado de saúde da bateria (0-100%)'
+              tags:
+                - tag: Application
+                  value: 'Battery {#BATTERY_ID}'
+                - tag: Component
+                  value: State
+            
+            - uuid: c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7
+              name: 'Battery {#BATTERY_ID}: Temperature (Max)'
+              type: ZABBIX_ACTIVE
+              key: 'battery.metric[{#BATTERY_ID},temp_max]'
+              delay: 1m
+              value_type: FLOAT
+              units: °C
+              description: 'Temperatura máxima entre os sensores da bateria'
+              tags:
+                - tag: Application
+                  value: 'Battery {#BATTERY_ID}'
+                - tag: Component
+                  value: Temperature
+            
+            - uuid: d8e0f2a4b6c8d0e2f4a6b8c0d2e4f6a8
+              name: 'Battery {#BATTERY_ID}: Cell Voltage (Min)'
+              type: ZABBIX_ACTIVE
+              key: 'battery.metric[{#BATTERY_ID},cell_min]'
+              delay: 1m
+              value_type: FLOAT
+              units: V
+              description: 'Tensão mínima entre as células'
+              tags:
+                - tag: Application
+                  value: 'Battery {#BATTERY_ID}'
+                - tag: Component
+                  value: Cells
+            
+            - uuid: e9f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9
+              name: 'Battery {#BATTERY_ID}: Cell Voltage (Max)'
+              type: ZABBIX_ACTIVE
+              key: 'battery.metric[{#BATTERY_ID},cell_max]'
+              delay: 1m
+              value_type: FLOAT
+              units: V
+              description: 'Tensão máxima entre as células'
+              tags:
+                - tag: Application
+                  value: 'Battery {#BATTERY_ID}'
+                - tag: Component
+                  value: Cells
+            
+            - uuid: f0a2b4c6d8e0f2a4b6c8d0e2f4a6b8c0
+              name: 'Battery {#BATTERY_ID}: Cell Voltage (Average)'
+              type: ZABBIX_ACTIVE
+              key: 'battery.metric[{#BATTERY_ID},cell_avg]'
+              delay: 1m
+              value_type: FLOAT
+              units: V
+              description: 'Tensão média das células'
+              tags:
+                - tag: Application
+                  value: 'Battery {#BATTERY_ID}'
+                - tag: Component
+                  value: Cells
+            
+            - uuid: a1b3c5d7e9f1a3b5c7d9e1f3a5b7c9d1
+              name: 'Battery {#BATTERY_ID}: Cell Voltage Difference'
+              type: ZABBIX_ACTIVE
+              key: 'battery.metric[{#BATTERY_ID},cell_diff]'
+              delay: 1m
+              value_type: FLOAT
+              units: V
+              description: 'Diferença entre tensão máxima e mínima das células (desbalanceamento)'
+              tags:
+                - tag: Application
+                  value: 'Battery {#BATTERY_ID}'
+                - tag: Component
+                  value: Cells
+            
+            - uuid: b2c4d6e8f0a2b4c6d8e0f2a4b6c8d0e2
+              name: 'Battery {#BATTERY_ID}: Cell Count'
+              type: ZABBIX_ACTIVE
+              key: 'battery.metric[{#BATTERY_ID},cell_count]'
+              delay: 1h
+              value_type: FLOAT
+              description: 'Número de células detectadas na bateria'
+              tags:
+                - tag: Application
+                  value: 'Battery {#BATTERY_ID}'
+                - tag: Component
+                  value: Cells
+            
+            - uuid: c3d5e7f9a1b3c5d7e9f1a3b5c7d9e1f3
+              name: 'Battery {#BATTERY_ID}: Status'
+              type: ZABBIX_ACTIVE
+              key: 'battery.metric[{#BATTERY_ID},status]'
+              delay: 1m
+              description: 'Status operacional da bateria (0=Stand by, 1=Charging, 2=Discharging)'
+              valuemap:
+                name: 'Battery Status'
+              tags:
+                - tag: Application
+                  value: 'Battery {#BATTERY_ID}'
+                - tag: Component
+                  value: State
+          
+          trigger_prototypes:
+            - uuid: d4e6f8a0b2c4d6e8f0a2b4c6d8e0f2a4
+              expression: 'last(/Battery UPLFP48100 Modbus/battery.metric[{#BATTERY_ID},soc])<{$BATTERY.SOC.CRIT}'
+              name: 'Battery {#BATTERY_ID}: Critical low State of Charge (<{$BATTERY.SOC.CRIT}%)'
+              opdata: 'Current SOC: {ITEM.LASTVALUE1}%'
+              priority: HIGH
+              description: 'Estado de carga crítico. Bateria necessita recarga urgente.'
+              tags:
+                - tag: scope
+                  value: capacity
+            
+            - uuid: e5f7a9b1c3d5e7f9a1b3c5d7e9f1a3b5
+              expression: 'last(/Battery UPLFP48100 Modbus/battery.metric[{#BATTERY_ID},soc])<{$BATTERY.SOC.WARN}'
+              name: 'Battery {#BATTERY_ID}: Low State of Charge (<{$BATTERY.SOC.WARN}%)'
+              opdata: 'Current SOC: {ITEM.LASTVALUE1}%'
+              priority: WARNING
+              description: 'Estado de carga baixo. Considere recarregar a bateria.'
+              dependencies:
+                - name: 'Battery {#BATTERY_ID}: Critical low State of Charge (<{$BATTERY.SOC.CRIT}%)'
+                  expression: 'last(/Battery UPLFP48100 Modbus/battery.metric[{#BATTERY_ID},soc])<{$BATTERY.SOC.CRIT}'
+              tags:
+                - tag: scope
+                  value: capacity
+            
+            - uuid: f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6
+              expression: 'last(/Battery UPLFP48100 Modbus/battery.metric[{#BATTERY_ID},temp_max])>{$BATTERY.TEMP.CRIT}'
+              name: 'Battery {#BATTERY_ID}: Critical high temperature (>{$BATTERY.TEMP.CRIT}°C)'
+              opdata: 'Current temperature: {ITEM.LASTVALUE1}°C'
+              priority: HIGH
+              description: 'Temperatura crítica! Risco de dano à bateria.'
+              tags:
+                - tag: scope
+                  value: temperature
+            
+            - uuid: a7b9c1d3e5f7a9b1c3d5e7f9a1b3c5d7
+              expression: 'last(/Battery UPLFP48100 Modbus/battery.metric[{#BATTERY_ID},temp_max])>{$BATTERY.TEMP.WARN}'
+              name: 'Battery {#BATTERY_ID}: High temperature (>{$BATTERY.TEMP.WARN}°C)'
+              opdata: 'Current temperature: {ITEM.LASTVALUE1}°C'
+              priority: WARNING
+              description: 'Temperatura elevada. Verifique ventilação.'
+              dependencies:
+                - name: 'Battery {#BATTERY_ID}: Critical high temperature (>{$BATTERY.TEMP.CRIT}°C)'
+                  expression: 'last(/Battery UPLFP48100 Modbus/battery.metric[{#BATTERY_ID},temp_max])>{$BATTERY.TEMP.CRIT}'
+              tags:
+                - tag: scope
+                  value: temperature
+            
+            - uuid: b8c0d2e4f6a8b0c2d4e6f8a0b2c4d6e8
+              expression: 'last(/Battery UPLFP48100 Modbus/battery.metric[{#BATTERY_ID},cell_diff])>{$BATTERY.CELL_DIFF.CRIT}'
+              name: 'Battery {#BATTERY_ID}: Critical cell voltage imbalance (>{$BATTERY.CELL_DIFF.CRIT}V)'
+              opdata: 'Current difference: {ITEM.LASTVALUE1}V'
+              priority: HIGH
+              description: 'Desbalanceamento crítico entre células. Bateria pode necessitar equalização.'
+              tags:
+                - tag: scope
+                  value: performance
+            
+            - uuid: c9d1e3f5a7b9c1d3e5f7a9b1c3d5e7f9
+              expression: 'last(/Battery UPLFP48100 Modbus/battery.metric[{#BATTERY_ID},cell_diff])>{$BATTERY.CELL_DIFF.WARN}'
+              name: 'Battery {#BATTERY_ID}: Cell voltage imbalance (>{$BATTERY.CELL_DIFF.WARN}V)'
+              opdata: 'Current difference: {ITEM.LASTVALUE1}V'
+              priority: WARNING
+              description: 'Desbalanceamento detectado entre células.'
+              dependencies:
+                - name: 'Battery {#BATTERY_ID}: Critical cell voltage imbalance (>{$BATTERY.CELL_DIFF.CRIT}V)'
+                  expression: 'last(/Battery UPLFP48100 Modbus/battery.metric[{#BATTERY_ID},cell_diff])>{$BATTERY.CELL_DIFF.CRIT}'
+              tags:
+                - tag: scope
+                  value: performance
+            
+            - uuid: d0e2f4a6b8c0d2e4f6a8b0c2d4e6f8a0
+              expression: 'last(/Battery UPLFP48100 Modbus/battery.metric[{#BATTERY_ID},soh])<{$BATTERY.SOH.WARN}'
+              name: 'Battery {#BATTERY_ID}: Low State of Health (<{$BATTERY.SOH.WARN}%)'
+              opdata: 'Current SOH: {ITEM.LASTVALUE1}%'
+              priority: AVERAGE
+              description: 'Estado de saúde degradado. Bateria pode necessitar substituição em breve.'
+              tags:
+                - tag: scope
+                  value: performance
+            
+            - uuid: e1f3a5b7c9d1e3f5a7b9c1d3e5f7a9b1
+              expression: 'nodata(/Battery UPLFP48100 Modbus/battery.metric[{#BATTERY_ID},voltage],5m)=1'
+              name: 'Battery {#BATTERY_ID}: No data received'
+              opdata: 'Last seen: {ITEM.LASTCLOCK1}'
+              priority: WARNING
+              description: 'Bateria não está respondendo. Verifique conexão Modbus.'
+              tags:
+                - tag: scope
+                  value: availability
+      
+      macros:
+        - macro: '{$BATTERY.CELL_DIFF.CRIT}'
+          value: '0.100'
+          description: 'Diferença crítica entre células (V)'
+        - macro: '{$BATTERY.CELL_DIFF.WARN}'
+          value: '0.050'
+          description: 'Diferença de alerta entre células (V)'
+        - macro: '{$BATTERY.SOC.CRIT}'
+          value: '10'
+          description: 'SOC crítico (%)'
+        - macro: '{$BATTERY.SOC.WARN}'
+          value: '20'
+          description: 'SOC de alerta (%)'
+        - macro: '{$BATTERY.SOH.WARN}'
+          value: '80'
+          description: 'SOH de alerta (%)'
+        - macro: '{$BATTERY.TEMP.CRIT}'
+          value: '50'
+          description: 'Temperatura crítica (°C)'
+        - macro: '{$BATTERY.TEMP.WARN}'
+          value: '45'
+          description: 'Temperatura de alerta (°C)'
+      
+      valuemaps:
+        - uuid: f2a4b6c8d0e2f4a6b8c0d2e4f6a8b0c2
+          name: 'Battery Status'
+          mappings:
+            - value: '0'
+              newvalue: 'Stand by'
+            - value: '1'
+              newvalue: Charging
+            - value: '2'
+              newvalue: Discharging
