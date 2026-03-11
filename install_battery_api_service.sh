@@ -17,6 +17,7 @@ LLDP_DEFAULT_FILE="/etc/default/lldpd"
 LLDP_HOSTNAME_FILE="/etc/lldpd.d/10-hostname.conf"
 NDP_SYSCTL_FILE="/etc/sysctl.d/99-ndp-enable.conf"
 HOSTNAME_OVERRIDE=""
+SKIP_ROOT_PASSWORD_CHANGE=0
 
 usage() {
   cat <<EOF
@@ -32,6 +33,7 @@ Opcoes:
   --python-bin <caminho>        Executavel Python (padrao: ${PYTHON_BIN})
   --skip-netplan-dep            Nao instala pacote netplan.io
   --hostname <nome>             Hostname anunciado por LLDP (padrao: hostname atual)
+  --skip-root-password-change   Nao solicita troca de senha do root
   -h, --help                    Mostra esta ajuda
 
 Exemplo:
@@ -82,6 +84,10 @@ parse_args() {
         HOSTNAME_OVERRIDE="${2:-}"
         shift 2
         ;;
+      --skip-root-password-change)
+        SKIP_ROOT_PASSWORD_CHANGE=1
+        shift
+        ;;
       -h|--help)
         usage
         exit 0
@@ -111,6 +117,39 @@ check_files() {
     echo "Erro: arquivo nao encontrado: ${MONITOR_SRC}" >&2
     exit 1
   fi
+}
+
+maybe_change_root_password() {
+  if [[ "${SKIP_ROOT_PASSWORD_CHANGE}" -eq 1 ]]; then
+    echo "Pulando troca de senha do root (--skip-root-password-change)."
+    return
+  fi
+
+  if ! id orangepi >/dev/null 2>&1; then
+    # Mantem comportamento focado no alvo citado (sistemas com usuario default orangepi).
+    return
+  fi
+
+  if [[ ! -t 0 ]]; then
+    echo "Aviso: sem terminal interativo; nao foi possivel solicitar troca de senha root."
+    echo "Execute manualmente: sudo passwd root"
+    return
+  fi
+
+  echo
+  echo "Seguranca: este sistema usa perfil padrao 'orangepi'."
+  read -r -p "Deseja trocar a senha do root agora? [S/n]: " answer
+  answer="${answer:-S}"
+
+  case "${answer}" in
+    S|s|Y|y)
+      echo "Abrindo troca de senha do root..."
+      passwd root
+      ;;
+    *)
+      echo "Troca de senha do root ignorada. Recomendado executar: sudo passwd root"
+      ;;
+  esac
 }
 
 ensure_dependencies() {
@@ -289,6 +328,7 @@ show_status() {
 main() {
   parse_args "$@"
   require_root
+  maybe_change_root_password
   check_files
   ensure_dependencies
   configure_ndp_sysctl
