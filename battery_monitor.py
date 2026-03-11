@@ -5,18 +5,21 @@ Mapeamento correto baseado em análise do CSV real
 """
 from pymodbus.client import ModbusSerialClient
 from datetime import datetime
+import argparse
+import json
 
 class BatteryMonitor:
-    def __init__(self, port='/dev/ttyUSB0', baudrate=9600, slave_id=1):
+    def __init__(self, port='/dev/ttyUSB0', baudrate=9600, slave_id=1, timeout=3):
         self.port = port
         self.baudrate = baudrate
         self.slave_id = slave_id
+        self.timeout = timeout
         self.client = None
     
     def connect(self):
         self.client = ModbusSerialClient(
             port=self.port, baudrate=self.baudrate,
-            bytesize=8, parity='N', stopbits=1, timeout=3
+            bytesize=8, parity='N', stopbits=1, timeout=self.timeout
         )
         return self.client.connect()
     
@@ -30,6 +33,48 @@ class BatteryMonitor:
         if result.isError():
             raise Exception(f"Erro: {result}")
         return self._parse(result.registers)
+
+    def read_battery_data(self, slave_id):
+        """Lê uma bateria específica e retorna dict com id + dados."""
+        result = self.client.read_holding_registers(address=0, count=39, slave=slave_id)
+        if result.isError():
+            raise Exception(f"Erro ao ler bateria {slave_id}: {result}")
+
+        data = self._parse(result.registers)
+        data['id'] = slave_id
+        return data
+
+    def read_batteries(self, ids):
+        """Lê uma lista de IDs e retorna apenas as baterias válidas."""
+        batteries = []
+        for slave_id in ids:
+            try:
+                batteries.append(self.read_battery_data(slave_id))
+            except Exception:
+                # Ignora IDs que não respondem
+                pass
+        return batteries
+
+    def discover_ids(self, start_id=1, end_id=16, timeout_seconds=2):
+        """Retorna IDs que respondem à leitura Modbus com timeout reduzido."""
+        found = []
+
+        original_timeout = getattr(self.client, 'timeout', None)
+        if original_timeout is not None:
+            self.client.timeout = timeout_seconds
+
+        try:
+            for slave_id in range(start_id, end_id + 1):
+                try:
+                    self.read_battery_data(slave_id)
+                    found.append(slave_id)
+                except Exception:
+                    pass
+        finally:
+            if original_timeout is not None:
+                self.client.timeout = original_timeout
+
+        return found
     
     def _parse(self, r):
         d = {}
@@ -197,46 +242,76 @@ class BatteryMonitor:
 
 
 if __name__ == "__main__":
-    import sys, time
-    
-    monitor = BatteryMonitor()
-    
+    def _parse_ids_csv(ids_csv):
+        ids = []
+        for raw in ids_csv.split(','):
+            value = raw.strip()
+            if not value:
+                continue
+            ids.append(int(value))
+        return ids
+
+    parser = argparse.ArgumentParser(
+        description="CLI Modbus para baterias UPLFP48100 com saida JSON"
+    )
+    parser.add_argument('--port', default='/dev/ttyUSB0', help='Porta serial (padrao: /dev/ttyUSB0)')
+    parser.add_argument('--baudrate', type=int, default=9600, help='Baudrate (padrao: 9600)')
+    parser.add_argument('--slave-id', type=int, default=1, help='ID usado em modo legado')
+    parser.add_argument('--start-id', type=int, default=1, help='Inicio do range para scan/discovery')
+    parser.add_argument('--end-id', type=int, default=16, help='Fim do range para scan/discovery')
+    parser.add_argument('--ids', help='IDs separados por virgula (ex: 1,2,5)')
+    parser.add_argument('--discover', action='store_true', help='Retorna somente IDs que respondem')
+    parser.add_argument('--pretty', action='store_true', help='Formata JSON com indentacao')
+
+    args = parser.parse_args()
+
+    monitor = BatteryMonitor(
+        port=args.port,
+        baudrate=args.baudrate,
+        slave_id=args.slave_id,
+    )
+
+    json_kwargs = {'ensure_ascii': False}
+    if args.pretty:
+        json_kwargs['indent'] = 2
+
     try:
-        print("Conectando...")
         if not monitor.connect():
-            print("❌ Falha")
+            print(json.dumps({'erro': 'Falha ao conectar no barramento Modbus'}, **json_kwargs))
             exit(1)
-        print("✓ Conectado\n")
-        
-        continuous = '--continuous' in sys.argv or '-c' in sys.argv
-        scan_mode = '--scan' in sys.argv or '-s' in sys.argv
-        
-        if scan_mode:
-            # Modo de varredura e dashboard
-            if continuous:
-                print("Modo dashboard contínuo (Ctrl+C para parar)\n")
-                while True:
-                    batteries = monitor.scan_batteries(1, 16)
-                    monitor.display_dashboard(batteries)
-                    time.sleep(5)
-            else:
-                batteries = monitor.scan_batteries(1, 16)
-                monitor.display_dashboard(batteries)
+
+        if args.discover:
+            ids = monitor.discover_ids(args.start_id, args.end_id)
+            payload = {
+                'ids': ids,
+                'total': len(ids)
+            }
+            print(json.dumps(payload, **json_kwargs))
+        elif args.ids:
+            ids = _parse_ids_csv(args.ids)
+            batteries = monitor.read_batteries(ids)
+            payload = {
+                'baterias': batteries,
+                'total': len(batteries)
+            }
+            print(json.dumps(payload, **json_kwargs))
         else:
-            # Modo individual (comportamento original)
-            if continuous:
-                print("Modo contínuo (Ctrl+C para parar)\n")
-                while True:
-                    data = monitor.read_data()
-                    monitor.display(data, monitor.slave_id)
-                    time.sleep(3)
-            else:
-                data = monitor.read_data()
-                monitor.display(data, monitor.slave_id)
-    
+            ids = monitor.discover_ids(args.start_id, args.end_id)
+            batteries = monitor.read_batteries(ids)
+            payload = {
+                'baterias': batteries,
+                'total': len(batteries)
+            }
+            print(json.dumps(payload, **json_kwargs))
+
+    except ValueError as e:
+        print(json.dumps({'erro': f'IDs invalidos: {e}'}, **json_kwargs))
+        exit(1)
     except KeyboardInterrupt:
-        print("\n⏹️  Parado\n")
+        print(json.dumps({'erro': 'Execucao interrompida'}, **json_kwargs))
+        exit(130)
     except Exception as e:
-        print(f"\n❌ Erro: {e}\n")
+        print(json.dumps({'erro': str(e)}, **json_kwargs))
+        exit(1)
     finally:
         monitor.disconnect()
