@@ -154,6 +154,7 @@ maybe_change_root_password() {
 
 ensure_dependencies() {
   local apt_to_install=()
+  local pip_to_install=()
   INSTALLED_APT_PACKAGES=()
   INSTALLED_PIP_PACKAGES=()
 
@@ -205,9 +206,20 @@ ensure_dependencies() {
   fi
 
   if ! "${PYTHON_BIN}" -c "import pymodbus" >/dev/null 2>&1; then
-    echo "Dependencia 'pymodbus' nao encontrada. Tentando instalar com pip..."
-    "${PYTHON_BIN}" -m pip install pymodbus
-    INSTALLED_PIP_PACKAGES+=(pymodbus)
+    pip_to_install+=(pymodbus)
+  fi
+
+  if ! "${PYTHON_BIN}" -c "import serial" >/dev/null 2>&1; then
+    pip_to_install+=(pyserial)
+  fi
+
+  if [[ ${#pip_to_install[@]} -gt 0 ]]; then
+    echo "Instalando dependencias Python: ${pip_to_install[*]}"
+    if ! "${PYTHON_BIN}" -m pip install "${pip_to_install[@]}"; then
+      echo "Tentando novamente com --break-system-packages (Python gerenciado pelo sistema)..."
+      "${PYTHON_BIN}" -m pip install --break-system-packages "${pip_to_install[@]}"
+    fi
+    INSTALLED_PIP_PACKAGES=("${pip_to_install[@]}")
   fi
 }
 
