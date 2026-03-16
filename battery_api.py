@@ -69,6 +69,7 @@ class BatteryApiHandler(BaseHTTPRequestHandler):
     monitor_timeout = 3
     discover_timeout = 0.5
     cache_interval = 10
+    cache_max_failures = int(os.environ.get("BATTERY_CACHE_MAX_FAILURES", "3"))
 
     _cache_lock = threading.Lock()
     _cache_started = False
@@ -77,6 +78,7 @@ class BatteryApiHandler(BaseHTTPRequestHandler):
         "baterias": [],
         "updated_at": None,
         "last_error": "Cache ainda nao inicializado",
+        "failure_counts": {},
     }
 
     def _restart_service(self):
@@ -189,6 +191,54 @@ class BatteryApiHandler(BaseHTTPRequestHandler):
         return monitor
 
     @classmethod
+    def _merge_cache_reading(cls, ids, baterias):
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        fresh_by_id = {}
+        for bateria in baterias:
+            battery_id = int(bateria.get("id", 0))
+            if battery_id > 0:
+                fresh_by_id[battery_id] = bateria
+
+        with cls._cache_lock:
+            previous_batteries = {}
+            for bateria in cls._cache_data.get("baterias", []):
+                battery_id = int(bateria.get("id", 0))
+                if battery_id > 0:
+                    previous_batteries[battery_id] = bateria
+
+            failure_counts = {
+                int(battery_id): int(count)
+                for battery_id, count in cls._cache_data.get("failure_counts", {}).items()
+            }
+
+            merged = {}
+            candidate_ids = set(previous_batteries) | set(fresh_by_id)
+
+            for battery_id in sorted(candidate_ids):
+                if battery_id in fresh_by_id:
+                    merged[battery_id] = fresh_by_id[battery_id]
+                    failure_counts[battery_id] = 0
+                    continue
+
+                previous = previous_batteries.get(battery_id)
+                if previous is None:
+                    continue
+
+                failure_counts[battery_id] = failure_counts.get(battery_id, 0) + 1
+                if failure_counts[battery_id] <= cls.cache_max_failures:
+                    merged[battery_id] = previous
+                else:
+                    failure_counts.pop(battery_id, None)
+
+            cls._cache_data = {
+                "ids": sorted(merged.keys()),
+                "baterias": [merged[battery_id] for battery_id in sorted(merged.keys())],
+                "updated_at": now,
+                "last_error": "",
+                "failure_counts": failure_counts,
+            }
+
+    @classmethod
     def _refresh_cache_once(cls):
         monitor = BatteryMonitor(
             port=cls.monitor_port,
@@ -204,13 +254,7 @@ class BatteryApiHandler(BaseHTTPRequestHandler):
         try:
             ids = monitor.discover_ids(1, 16, timeout_seconds=cls.discover_timeout)
             baterias = monitor.read_batteries(ids)
-            with cls._cache_lock:
-                cls._cache_data = {
-                    "ids": ids,
-                    "baterias": baterias,
-                    "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "last_error": "",
-                }
+            cls._merge_cache_reading(ids, baterias)
         except Exception as exc:
             with cls._cache_lock:
                 cls._cache_data["last_error"] = str(exc)
