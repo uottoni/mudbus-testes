@@ -32,6 +32,8 @@ import os
 import sys
 import threading
 import time
+import json
+from urllib import request, error
 
 # Permite importar battery_monitor.py instalado junto com este script
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -45,6 +47,8 @@ BASE_OID = os.environ.get("BATTERY_SNMP_BASE_OID", ".1.3.6.1.4.1.99999.1")
 ENV_FILE  = os.environ.get("BATTERY_ENV_FILE", "/etc/battery-api.env")
 REFRESH_INTERVAL = int(os.environ.get("BATTERY_SNMP_REFRESH", "10"))  # segundos
 DEFAULT_DISCOVER_TIMEOUT = 0.5
+BATTERY_API_URL = os.environ.get("BATTERY_API_URL", "http://127.0.0.1:8080/batteries")
+BATTERY_API_TIMEOUT = float(os.environ.get("BATTERY_API_TIMEOUT", "3"))
 
 # Indices dos campos por bateria (subOID relativo a BASE.2.<id>)
 _F_ID        = 1
@@ -106,9 +110,14 @@ class SnmpPassPersistAgent:
         self._sorted_oids: list = []
         self._base_tuple = _oid_to_tuple(BASE_OID)
 
-        # Inicializa com mapa vazio e dispara refresh em background para nao
-        # bloquear resposta SNMP durante startup do pass_persist.
+        # Inicializa com mapa vazio.
         self._build_map([])
+
+        # Primeiro refresh sincrono: busca do cache HTTP eh rapida e evita
+        # janela inicial com total=0 logo apos restart do snmpd.
+        self._refresh_once()
+
+        # Atualizacao periodica em background.
         t = threading.Thread(target=self._background_loop, daemon=True)
         t.start()
 
@@ -153,7 +162,28 @@ class SnmpPassPersistAgent:
     # Coleta periodica de dados
     # ------------------------------------------------------------------
 
+    def _fetch_from_api_cache(self):
+        req = request.Request(BATTERY_API_URL, method="GET")
+        with request.urlopen(req, timeout=BATTERY_API_TIMEOUT) as resp:
+            raw = resp.read().decode("utf-8")
+
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            return []
+
+        baterias = payload.get("baterias", [])
+        if isinstance(baterias, list):
+            return baterias
+        return []
+
     def _fetch_batteries(self) -> list:
+        # Preferencia: usa cache da API para evitar disputa da serial Modbus.
+        try:
+            return self._fetch_from_api_cache()
+        except Exception:
+            pass
+
+        # Fallback opcional: leitura direta Modbus, caso API esteja indisponivel.
         cfg     = _read_env()
         discover_timeout = float(cfg.get("DISCOVER_TIMEOUT", DEFAULT_DISCOVER_TIMEOUT))
         monitor = BatteryMonitor(
