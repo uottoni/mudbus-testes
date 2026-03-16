@@ -2,6 +2,7 @@
 """API HTTP simples para expor leituras de baterias via Modbus."""
 
 import argparse
+import copy
 import datetime
 import html
 import ipaddress
@@ -10,6 +11,8 @@ import os
 import shutil
 import socket
 import subprocess
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -64,6 +67,17 @@ class BatteryApiHandler(BaseHTTPRequestHandler):
     monitor_port = "/dev/ttyUSB0"
     monitor_baudrate = 9600
     monitor_timeout = 3
+    discover_timeout = 0.5
+    cache_interval = 10
+
+    _cache_lock = threading.Lock()
+    _cache_started = False
+    _cache_data = {
+        "ids": [],
+        "baterias": [],
+        "updated_at": None,
+        "last_error": "Cache ainda nao inicializado",
+    }
 
     def _restart_service(self):
         """Reinicia o servico da API de forma sincrona para garantir aplicacao de config."""
@@ -174,31 +188,87 @@ class BatteryApiHandler(BaseHTTPRequestHandler):
             raise RuntimeError("Falha ao conectar no barramento Modbus")
         return monitor
 
+    @classmethod
+    def _refresh_cache_once(cls):
+        monitor = BatteryMonitor(
+            port=cls.monitor_port,
+            baudrate=cls.monitor_baudrate,
+            timeout=cls.monitor_timeout,
+        )
+
+        if not monitor.connect():
+            with cls._cache_lock:
+                cls._cache_data["last_error"] = "Falha ao conectar no barramento Modbus"
+            return
+
+        try:
+            ids = monitor.discover_ids(1, 16, timeout_seconds=cls.discover_timeout)
+            baterias = monitor.read_batteries(ids)
+            with cls._cache_lock:
+                cls._cache_data = {
+                    "ids": ids,
+                    "baterias": baterias,
+                    "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "last_error": "",
+                }
+        except Exception as exc:
+            with cls._cache_lock:
+                cls._cache_data["last_error"] = str(exc)
+        finally:
+            monitor.disconnect()
+
+    @classmethod
+    def _cache_loop(cls):
+        while True:
+            cls._refresh_cache_once()
+            time.sleep(max(1, int(cls.cache_interval)))
+
+    @classmethod
+    def start_cache_worker(cls):
+        if cls._cache_started:
+            return
+        cls._cache_started = True
+        worker = threading.Thread(target=cls._cache_loop, daemon=True)
+        worker.start()
+
+    @classmethod
+    def _get_cache_snapshot(cls):
+        with cls._cache_lock:
+            snapshot = copy.deepcopy(cls._cache_data)
+        return snapshot
+
     def _handle_discover(self, params):
         start_id = int(params.get("start_id", 1))
         end_id = int(params.get("end_id", 16))
-        timeout = float(params.get("timeout", 2))
-
-        monitor = self._build_monitor()
-        try:
-            ids = monitor.discover_ids(start_id, end_id, timeout_seconds=timeout)
-            return {"ids": ids, "total": len(ids)}
-        finally:
-            monitor.disconnect()
+        snapshot = self._get_cache_snapshot()
+        ids = [battery_id for battery_id in snapshot.get("ids", []) if start_id <= battery_id <= end_id]
+        return {
+            "ids": ids,
+            "total": len(ids),
+            "cache_updated_at": snapshot.get("updated_at"),
+            "cache_error": snapshot.get("last_error", ""),
+        }
 
     def _handle_batteries(self, params):
         start_id = int(params.get("start_id", 1))
         end_id = int(params.get("end_id", 16))
         ids = parse_ids(params.get("ids"))
 
-        monitor = self._build_monitor()
-        try:
-            if ids is None:
-                ids = monitor.discover_ids(start_id, end_id, timeout_seconds=2)
-            baterias = monitor.read_batteries(ids)
-            return {"baterias": baterias, "total": len(baterias)}
-        finally:
-            monitor.disconnect()
+        snapshot = self._get_cache_snapshot()
+        baterias_cache = snapshot.get("baterias", [])
+
+        if ids is None:
+            baterias = [b for b in baterias_cache if start_id <= int(b.get("id", 0)) <= end_id]
+        else:
+            requested_ids = set(ids)
+            baterias = [b for b in baterias_cache if int(b.get("id", 0)) in requested_ids]
+
+        return {
+            "baterias": baterias,
+            "total": len(baterias),
+            "cache_updated_at": snapshot.get("updated_at"),
+            "cache_error": snapshot.get("last_error", ""),
+        }
 
     def _read_env_values(self):
         values = {}
@@ -680,6 +750,8 @@ def main():
     parser.add_argument("--modbus-port", default="/dev/ttyUSB0", help="Porta serial Modbus")
     parser.add_argument("--baudrate", type=int, default=9600, help="Baudrate Modbus")
     parser.add_argument("--modbus-timeout", type=float, default=3, help="Timeout padrao Modbus")
+    parser.add_argument("--discover-timeout", type=float, default=0.5, help="Timeout padrao do discovery Modbus")
+    parser.add_argument("--cache-interval", type=int, default=10, help="Intervalo de atualizacao do cache em segundos")
     args = parser.parse_args()
 
     BatteryApiHandler.env_file = args.env_file
@@ -689,6 +761,9 @@ def main():
     BatteryApiHandler.monitor_port = args.modbus_port
     BatteryApiHandler.monitor_baudrate = args.baudrate
     BatteryApiHandler.monitor_timeout = args.modbus_timeout
+    BatteryApiHandler.discover_timeout = args.discover_timeout
+    BatteryApiHandler.cache_interval = args.cache_interval
+    BatteryApiHandler.start_cache_worker()
 
     server = ThreadingHTTPServer((args.host, args.port), BatteryApiHandler)
     print(f"API iniciada em http://{args.host}:{args.port}")

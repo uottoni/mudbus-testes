@@ -12,9 +12,12 @@ PORT="${PORT:-8080}"
 MODBUS_PORT="${MODBUS_PORT:-/dev/ttyUSB0}"
 BAUDRATE="${BAUDRATE:-9600}"
 MODBUS_TIMEOUT="${MODBUS_TIMEOUT:-3}"
+DISCOVER_TIMEOUT="${DISCOVER_TIMEOUT:-0.5}"
 INSTALL_NETPLAN_DEP=1
 LLDP_DEFAULT_FILE="/etc/default/lldpd"
 LLDP_HOSTNAME_FILE="/etc/lldpd.d/10-hostname.conf"
+SNMP_CONF_FILE="/etc/snmp/snmpd.conf"
+SNMP_BASE_OID="${SNMP_BASE_OID:-.1.3.6.1.4.1.99999.1}"
 NDP_SYSCTL_FILE="/etc/sysctl.d/99-ndp-enable.conf"
 HOSTNAME_OVERRIDE=""
 SKIP_ROOT_PASSWORD_CHANGE=0
@@ -30,11 +33,13 @@ Opcoes:
   --modbus-port <porta_serial>  Porta Modbus (padrao: ${MODBUS_PORT})
   --baudrate <baudrate>         Baudrate Modbus (padrao: ${BAUDRATE})
   --modbus-timeout <segundos>   Timeout Modbus (padrao: ${MODBUS_TIMEOUT})
+  --discover-timeout <segundos> Timeout padrao discovery (padrao: ${DISCOVER_TIMEOUT})
   --python-bin <caminho>        Executavel Python (padrao: ${PYTHON_BIN})
   --skip-netplan-dep            Nao instala pacote netplan.io
   --hostname <nome>             Hostname anunciado por LLDP (padrao: hostname atual)
   --skip-root-password-change   Nao solicita troca de senha do root
   -h, --help                    Mostra esta ajuda
+  --snmp-oid <oid>               OID base para pass_persist (padrao: ${SNMP_BASE_OID})
 
 Exemplo:
   sudo bash install_battery_api_service.sh \
@@ -72,6 +77,10 @@ parse_args() {
         MODBUS_TIMEOUT="${2:-}"
         shift 2
         ;;
+      --discover-timeout)
+        DISCOVER_TIMEOUT="${2:-}"
+        shift 2
+        ;;
       --python-bin)
         PYTHON_BIN="${2:-}"
         shift 2
@@ -87,6 +96,10 @@ parse_args() {
       --skip-root-password-change)
         SKIP_ROOT_PASSWORD_CHANGE=1
         shift
+        ;;
+      --snmp-oid)
+        SNMP_BASE_OID="${2:-}"
+        shift 2
         ;;
       -h|--help)
         usage
@@ -107,6 +120,7 @@ check_files() {
 
   API_SRC="${base_dir}/battery_api.py"
   MONITOR_SRC="${base_dir}/battery_monitor.py"
+  SNMP_AGENT_SRC="${base_dir}/battery_snmp_agent.py"
 
   if [[ ! -f "${API_SRC}" ]]; then
     echo "Erro: arquivo nao encontrado: ${API_SRC}" >&2
@@ -115,6 +129,11 @@ check_files() {
 
   if [[ ! -f "${MONITOR_SRC}" ]]; then
     echo "Erro: arquivo nao encontrado: ${MONITOR_SRC}" >&2
+    exit 1
+  fi
+
+  if [[ ! -f "${SNMP_AGENT_SRC}" ]]; then
+    echo "Erro: arquivo nao encontrado: ${SNMP_AGENT_SRC}" >&2
     exit 1
   fi
 }
@@ -186,6 +205,10 @@ ensure_dependencies() {
 
   if ! command -v ndisc6 >/dev/null 2>&1; then
     apt_to_install+=(ndisc6)
+  fi
+
+  if ! command -v snmpd >/dev/null 2>&1; then
+    apt_to_install+=(snmpd)
   fi
 
   if [[ ${#apt_to_install[@]} -gt 0 ]]; then
@@ -266,6 +289,7 @@ write_state_file() {
 INSTALLED_APT_PACKAGES=${INSTALLED_APT_PACKAGES[*]}
 INSTALLED_PIP_PACKAGES=${INSTALLED_PIP_PACKAGES[*]}
 PYTHON_BIN=${PYTHON_BIN}
+DISCOVER_TIMEOUT=${DISCOVER_TIMEOUT}
 LLDP_DEFAULT_FILE=${LLDP_DEFAULT_FILE}
 LLDP_HOSTNAME_FILE=${LLDP_HOSTNAME_FILE}
 NDP_SYSCTL_FILE=${NDP_SYSCTL_FILE}
@@ -278,7 +302,59 @@ install_files() {
   mkdir -p "${INSTALL_DIR}"
   cp "${API_SRC}" "${INSTALL_DIR}/battery_api.py"
   cp "${MONITOR_SRC}" "${INSTALL_DIR}/battery_monitor.py"
-  chmod 755 "${INSTALL_DIR}/battery_api.py" "${INSTALL_DIR}/battery_monitor.py"
+  cp "${SNMP_AGENT_SRC}" "${INSTALL_DIR}/battery_snmp_agent.py"
+  chmod 755 "${INSTALL_DIR}/battery_api.py" "${INSTALL_DIR}/battery_monitor.py" "${INSTALL_DIR}/battery_snmp_agent.py"
+}
+
+configure_snmpd() {
+  local pass_line="pass_persist ${SNMP_BASE_OID} ${PYTHON_BIN} ${INSTALL_DIR}/battery_snmp_agent.py"
+  local battery_view="batteryview"
+
+  # Garante acesso do usuario do daemon snmpd a porta serial (dialout)
+  if id Debian-snmp >/dev/null 2>&1; then
+    usermod -aG dialout Debian-snmp || true
+  fi
+
+  # Compatibilidade com outras distros que usam usuario 'snmp'.
+  if id snmp >/dev/null 2>&1; then
+    usermod -aG dialout snmp || true
+  fi
+
+  if [[ -f "${SNMP_CONF_FILE}" ]]; then
+    # Garante acesso de leitura ao subtree enterprise da bateria.
+    if grep -qE '^rocommunity\s+public\s+default\s+-V\s+systemonly' "${SNMP_CONF_FILE}"; then
+      sed -i 's/^rocommunity\s\+public\s\+default\s\+-V\s\+systemonly/rocommunity public default -V batteryview/' "${SNMP_CONF_FILE}"
+    fi
+
+    if grep -qE '^rocommunity6\s+public\s+default\s+-V\s+systemonly' "${SNMP_CONF_FILE}"; then
+      sed -i 's/^rocommunity6\s\+public\s\+default\s\+-V\s\+systemonly/rocommunity6 public default -V batteryview/' "${SNMP_CONF_FILE}"
+    fi
+
+    if ! grep -qE "^view\\s+${battery_view}\\s+included\\s+${SNMP_BASE_OID}(\\s|$)" "${SNMP_CONF_FILE}"; then
+      printf '\n# Battery API view\nview %s included %s\n' "${battery_view}" "${SNMP_BASE_OID}" >> "${SNMP_CONF_FILE}"
+    fi
+
+    # Evita duplicacao em reinstalacoes
+    if ! grep -qF "battery_snmp_agent.py" "${SNMP_CONF_FILE}"; then
+      printf '\n# Battery API SNMP pass_persist\n%s\n' "${pass_line}" >> "${SNMP_CONF_FILE}"
+    else
+      # Atualiza linha existente (pode ter mudado o OID ou python bin)
+      sed -i "s|.*battery_snmp_agent\.py.*|${pass_line}|" "${SNMP_CONF_FILE}"
+    fi
+  else
+    mkdir -p "$(dirname "${SNMP_CONF_FILE}")"
+    cat > "${SNMP_CONF_FILE}" <<EOF
+# Battery API - configuracao minima snmpd
+view ${battery_view} included ${SNMP_BASE_OID}
+rocommunity public default -V ${battery_view}
+
+# Battery API SNMP pass_persist
+${pass_line}
+EOF
+  fi
+
+  systemctl enable snmpd
+  systemctl restart snmpd
 }
 
 write_env_file() {
@@ -288,9 +364,17 @@ PORT=${PORT}
 MODBUS_PORT=${MODBUS_PORT}
 BAUDRATE=${BAUDRATE}
 MODBUS_TIMEOUT=${MODBUS_TIMEOUT}
+DISCOVER_TIMEOUT=${DISCOVER_TIMEOUT}
 PYTHON_BIN=${PYTHON_BIN}
 EOF
-  chmod 600 "${ENV_FILE}"
+
+  # snmpd (Debian-snmp/snmp) precisa ler este arquivo para o pass_persist.
+  if id Debian-snmp >/dev/null 2>&1; then
+    chgrp Debian-snmp "${ENV_FILE}" || true
+  elif id snmp >/dev/null 2>&1; then
+    chgrp snmp "${ENV_FILE}" || true
+  fi
+  chmod 640 "${ENV_FILE}"
 }
 
 write_service_file() {
@@ -303,7 +387,7 @@ After=network.target
 Type=simple
 EnvironmentFile=${ENV_FILE}
 WorkingDirectory=${INSTALL_DIR}
-ExecStart=${PYTHON_BIN} ${INSTALL_DIR}/battery_api.py --host \${HOST} --port \${PORT} --env-file ${ENV_FILE} --service-name ${SERVICE_NAME} --modbus-port \${MODBUS_PORT} --baudrate \${BAUDRATE} --modbus-timeout \${MODBUS_TIMEOUT}
+ExecStart=${PYTHON_BIN} ${INSTALL_DIR}/battery_api.py --host \${HOST} --port \${PORT} --env-file ${ENV_FILE} --service-name ${SERVICE_NAME} --modbus-port \${MODBUS_PORT} --baudrate \${BAUDRATE} --modbus-timeout \${MODBUS_TIMEOUT} --discover-timeout \${DISCOVER_TIMEOUT}
 Restart=always
 RestartSec=3
 User=root
@@ -335,6 +419,10 @@ show_status() {
   echo "Teste rapido:"
   echo "  curl http://127.0.0.1:${PORT}/health"
   echo "  UI: http://127.0.0.1:${PORT}/ui/network"
+  echo
+  echo "Teste SNMP (requer snmp-mibs-downloader ou snmptranslate):"
+  echo "  snmpwalk -v2c -c public localhost ${SNMP_BASE_OID}"
+  echo "  snmpget  -v2c -c public localhost ${SNMP_BASE_OID}.1.0"
 }
 
 main() {
@@ -350,6 +438,7 @@ main() {
   write_state_file
   write_service_file
   start_service
+    configure_snmpd
   show_status
 }
 

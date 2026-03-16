@@ -55,7 +55,7 @@ class BatteryMonitor:
                 pass
         return batteries
 
-    def discover_ids(self, start_id=1, end_id=16, timeout_seconds=2):
+    def discover_ids(self, start_id=1, end_id=16, timeout_seconds=0.5):
         """Retorna IDs que respondem à leitura Modbus com timeout reduzido."""
         found = []
 
