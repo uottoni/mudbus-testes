@@ -18,6 +18,7 @@ LLDP_DEFAULT_FILE="/etc/default/lldpd"
 LLDP_HOSTNAME_FILE="/etc/lldpd.d/10-hostname.conf"
 SNMP_CONF_FILE="/etc/snmp/snmpd.conf"
 SNMP_BASE_OID="${SNMP_BASE_OID:-.1.3.6.1.4.1.99999.1}"
+SNMP_COMMUNITY="${SNMP_COMMUNITY:-}"
 NDP_SYSCTL_FILE="/etc/sysctl.d/99-ndp-enable.conf"
 HOSTNAME_OVERRIDE=""
 SKIP_ROOT_PASSWORD_CHANGE=0
@@ -39,7 +40,8 @@ Opcoes:
   --hostname <nome>             Hostname anunciado por LLDP (padrao: hostname atual)
   --skip-root-password-change   Nao solicita troca de senha do root
   -h, --help                    Mostra esta ajuda
-  --snmp-oid <oid>               OID base para pass_persist (padrao: ${SNMP_BASE_OID})
+  --snmp-oid <oid>              OID base para pass_persist (padrao: ${SNMP_BASE_OID})
+  --snmp-community <texto>      Community SNMP v2c (obrigatoria)
 
 Exemplo:
   sudo bash install_battery_api_service.sh \
@@ -101,6 +103,10 @@ parse_args() {
         SNMP_BASE_OID="${2:-}"
         shift 2
         ;;
+      --snmp-community)
+        SNMP_COMMUNITY="${2:-}"
+        shift 2
+        ;;
       -h|--help)
         usage
         exit 0
@@ -112,6 +118,24 @@ parse_args() {
         ;;
     esac
   done
+}
+
+ensure_snmp_community() {
+  if [[ -z "${SNMP_COMMUNITY}" ]]; then
+    if [[ -t 0 ]]; then
+      read -r -p "Informe a community SNMP v2c: " SNMP_COMMUNITY
+    fi
+  fi
+
+  if [[ -z "${SNMP_COMMUNITY}" ]]; then
+    echo "Erro: informe a community SNMP com --snmp-community <texto>." >&2
+    exit 1
+  fi
+
+  if [[ "${SNMP_COMMUNITY}" =~ [[:space:]] ]]; then
+    echo "Erro: community SNMP nao pode conter espacos." >&2
+    exit 1
+  fi
 }
 
 check_files() {
@@ -308,7 +332,10 @@ install_files() {
 
 configure_snmpd() {
   local pass_line="pass_persist ${SNMP_BASE_OID} ${PYTHON_BIN} ${INSTALL_DIR}/battery_snmp_agent.py"
+  local listen_line="agentaddress 0.0.0.0,[::]"
   local battery_view="batteryview"
+  local ro_line="rocommunity ${SNMP_COMMUNITY} default -V ${battery_view}"
+  local ro6_line="rocommunity6 ${SNMP_COMMUNITY} default -V ${battery_view}"
 
   # Garante acesso do usuario do daemon snmpd a porta serial (dialout)
   if id Debian-snmp >/dev/null 2>&1; then
@@ -321,13 +348,21 @@ configure_snmpd() {
   fi
 
   if [[ -f "${SNMP_CONF_FILE}" ]]; then
+    # Expor SNMP em todos os enderecos IPv4/IPv6.
+    sed -i '/^[[:space:]]*#\{0,1\}[[:space:]]*[Aa][Gg][Ee][Nn][Tt][Aa][Dd][Dd][Rr][Ee][Ss][Ss][[:space:]]\+/d' "${SNMP_CONF_FILE}"
+    printf '%s\n' "${listen_line}" >> "${SNMP_CONF_FILE}"
+
     # Garante acesso de leitura ao subtree enterprise da bateria.
-    if grep -qE '^rocommunity\s+public\s+default\s+-V\s+systemonly' "${SNMP_CONF_FILE}"; then
-      sed -i 's/^rocommunity\s\+public\s\+default\s\+-V\s\+systemonly/rocommunity public default -V batteryview/' "${SNMP_CONF_FILE}"
+    if grep -qE '^rocommunity\s+\S+\s+default\s+-V\s+batteryview\s*$' "${SNMP_CONF_FILE}"; then
+      sed -i "s|^rocommunity\s\+\S\+\s\+default\s\+-V\s\+batteryview\s*$|${ro_line}|" "${SNMP_CONF_FILE}"
+    else
+      printf '%s\n' "${ro_line}" >> "${SNMP_CONF_FILE}"
     fi
 
-    if grep -qE '^rocommunity6\s+public\s+default\s+-V\s+systemonly' "${SNMP_CONF_FILE}"; then
-      sed -i 's/^rocommunity6\s\+public\s\+default\s\+-V\s\+systemonly/rocommunity6 public default -V batteryview/' "${SNMP_CONF_FILE}"
+    if grep -qE '^rocommunity6\s+\S+\s+default\s+-V\s+batteryview\s*$' "${SNMP_CONF_FILE}"; then
+      sed -i "s|^rocommunity6\s\+\S\+\s\+default\s\+-V\s\+batteryview\s*$|${ro6_line}|" "${SNMP_CONF_FILE}"
+    else
+      printf '%s\n' "${ro6_line}" >> "${SNMP_CONF_FILE}"
     fi
 
     if ! grep -qE "^view\\s+${battery_view}\\s+included\\s+${SNMP_BASE_OID}(\\s|$)" "${SNMP_CONF_FILE}"; then
@@ -345,8 +380,10 @@ configure_snmpd() {
     mkdir -p "$(dirname "${SNMP_CONF_FILE}")"
     cat > "${SNMP_CONF_FILE}" <<EOF
 # Battery API - configuracao minima snmpd
+${listen_line}
 view ${battery_view} included ${SNMP_BASE_OID}
-rocommunity public default -V ${battery_view}
+${ro_line}
+${ro6_line}
 
 # Battery API SNMP pass_persist
 ${pass_line}
@@ -421,12 +458,13 @@ show_status() {
   echo "  UI: http://127.0.0.1:${PORT}/ui/network"
   echo
   echo "Teste SNMP (requer snmp-mibs-downloader ou snmptranslate):"
-  echo "  snmpwalk -v2c -c public localhost ${SNMP_BASE_OID}"
-  echo "  snmpget  -v2c -c public localhost ${SNMP_BASE_OID}.1.0"
+  echo "  snmpwalk -v2c -c <community> localhost ${SNMP_BASE_OID}"
+  echo "  snmpget  -v2c -c <community> localhost ${SNMP_BASE_OID}.1.0"
 }
 
 main() {
   parse_args "$@"
+  ensure_snmp_community
   require_root
   maybe_change_root_password
   check_files
