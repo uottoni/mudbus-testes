@@ -91,8 +91,8 @@ class BatteryMonitor:
         # Células: registros 2-16 (15 células em mV)
         d['cells'] = [r[i]/1000.0 for i in range(2, 17) if 2.0 < r[i]/1000.0 < 4.5]
         
-        # Temperaturas: registros 18-21
-        d['temps'] = [r[18], r[19], r[20], r[21] if r[21] < 100 else 0]
+        # Temperaturas: registros 18-20
+        d['temps'] = [r[18], r[19], r[20]]
         
         # SOC/SOH: registros 21-22
         d['soc'] = r[21]
