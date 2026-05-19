@@ -109,7 +109,7 @@ class BatteryApiHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"status": "ok"})
                 return
 
-            if path == "/ui/network":
+            if path == "/":
                 self._send_html(200, self._render_network_ui())
                 return
 
