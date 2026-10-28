@@ -13,6 +13,9 @@ MODBUS_PORT="${MODBUS_PORT:-/dev/ttyUSB0}"
 BAUDRATE="${BAUDRATE:-9600}"
 MODBUS_TIMEOUT="${MODBUS_TIMEOUT:-3}"
 DISCOVER_TIMEOUT="${DISCOVER_TIMEOUT:-0.5}"
+DHT_PIN="${DHT_PIN:-PA6}"
+DHT_INTERVAL="${DHT_INTERVAL:-10}"
+PYMODBUS_SPEC="pymodbus>=3.0,<3.10"
 INSTALL_NETPLAN_DEP=1
 LLDP_DEFAULT_FILE="/etc/default/lldpd"
 LLDP_HOSTNAME_FILE="/etc/lldpd.d/10-hostname.conf"
@@ -42,6 +45,8 @@ Opcoes:
   -h, --help                    Mostra esta ajuda
   --snmp-oid <oid>              OID base para pass_persist (padrao: ${SNMP_BASE_OID})
   --snmp-community <texto>      Community SNMP v2c (obrigatoria)
+  --dht-pin <pino|none>         Pino de dados do sensor DHT11, PA* ou PG* (padrao: ${DHT_PIN})
+  --dht-interval <segundos>     Intervalo de leitura do DHT11 (padrao: ${DHT_INTERVAL})
 
 Exemplo:
   sudo bash install_battery_api_service.sh \
@@ -107,6 +112,14 @@ parse_args() {
         SNMP_COMMUNITY="${2:-}"
         shift 2
         ;;
+      --dht-pin)
+        DHT_PIN="${2:-}"
+        shift 2
+        ;;
+      --dht-interval)
+        DHT_INTERVAL="${2:-}"
+        shift 2
+        ;;
       -h|--help)
         usage
         exit 0
@@ -118,6 +131,15 @@ parse_args() {
         ;;
     esac
   done
+
+  if [[ "${DHT_PIN,,}" == "none" ]]; then
+    DHT_PIN=""
+  fi
+  DHT_PIN="${DHT_PIN^^}"
+  if [[ -n "${DHT_PIN}" && ! "${DHT_PIN}" =~ ^P[AG][0-9]{1,2}$ ]]; then
+    echo "Erro: --dht-pin deve ser um pino das portas PA ou PG (ex: PA6) ou 'none'." >&2
+    exit 1
+  fi
 }
 
 ensure_snmp_community() {
@@ -145,6 +167,12 @@ check_files() {
   API_SRC="${base_dir}/battery_api.py"
   MONITOR_SRC="${base_dir}/battery_monitor.py"
   SNMP_AGENT_SRC="${base_dir}/battery_snmp_agent.py"
+  DHT_SRC="${base_dir}/dht_sensor.py"
+
+  if [[ ! -f "${DHT_SRC}" ]]; then
+    echo "Erro: arquivo nao encontrado: ${DHT_SRC}" >&2
+    exit 1
+  fi
 
   if [[ ! -f "${API_SRC}" ]]; then
     echo "Erro: arquivo nao encontrado: ${API_SRC}" >&2
@@ -235,6 +263,11 @@ ensure_dependencies() {
     apt_to_install+=(snmpd)
   fi
 
+  # Leitor DHT11 usa a API v2 do libgpiod (gpiod.request_lines)
+  if [[ -n "${DHT_PIN}" ]] && ! "${PYTHON_BIN}" -c "import gpiod; gpiod.request_lines" >/dev/null 2>&1; then
+    apt_to_install+=(python3-libgpiod)
+  fi
+
   if [[ ${#apt_to_install[@]} -gt 0 ]]; then
     local unique_apt=()
     local pkg
@@ -252,8 +285,10 @@ ensure_dependencies() {
     fi
   fi
 
-  if ! "${PYTHON_BIN}" -c "import pymodbus" >/dev/null 2>&1; then
-    pip_to_install+=(pymodbus)
+  # battery_monitor.py usa o kwarg slave=, renomeado para device_id= no pymodbus 3.10;
+  # reinstala tambem quando a versao presente for nova demais.
+  if ! "${PYTHON_BIN}" -c "import inspect; from pymodbus.client import ModbusSerialClient as C; assert 'slave' in inspect.signature(C.read_holding_registers).parameters" >/dev/null 2>&1; then
+    pip_to_install+=("${PYMODBUS_SPEC}")
   fi
 
   if ! "${PYTHON_BIN}" -c "import serial" >/dev/null 2>&1; then
@@ -266,7 +301,15 @@ ensure_dependencies() {
       echo "Tentando novamente com --break-system-packages (Python gerenciado pelo sistema)..."
       "${PYTHON_BIN}" -m pip install --break-system-packages "${pip_to_install[@]}"
     fi
-    INSTALLED_PIP_PACKAGES=("${pip_to_install[@]}")
+    # Estado guarda so os nomes (sem especificador de versao) para o uninstall
+    local spec
+    for spec in "${pip_to_install[@]}"; do
+      INSTALLED_PIP_PACKAGES+=("${spec%%[<>=]*}")
+    done
+  fi
+
+  if [[ -n "${DHT_PIN}" ]] && ! "${PYTHON_BIN}" -c "import gpiod; gpiod.request_lines" >/dev/null 2>&1; then
+    echo "Aviso: libgpiod v2 (python3-libgpiod >= 2.0) indisponivel; leitura do DHT11 ficara inativa." >&2
   fi
 }
 
@@ -327,7 +370,8 @@ install_files() {
   cp "${API_SRC}" "${INSTALL_DIR}/battery_api.py"
   cp "${MONITOR_SRC}" "${INSTALL_DIR}/battery_monitor.py"
   cp "${SNMP_AGENT_SRC}" "${INSTALL_DIR}/battery_snmp_agent.py"
-  chmod 755 "${INSTALL_DIR}/battery_api.py" "${INSTALL_DIR}/battery_monitor.py" "${INSTALL_DIR}/battery_snmp_agent.py"
+  cp "${DHT_SRC}" "${INSTALL_DIR}/dht_sensor.py"
+  chmod 755 "${INSTALL_DIR}/battery_api.py" "${INSTALL_DIR}/battery_monitor.py" "${INSTALL_DIR}/battery_snmp_agent.py" "${INSTALL_DIR}/dht_sensor.py"
 }
 
 configure_snmpd() {
@@ -403,6 +447,8 @@ BAUDRATE=${BAUDRATE}
 MODBUS_TIMEOUT=${MODBUS_TIMEOUT}
 DISCOVER_TIMEOUT=${DISCOVER_TIMEOUT}
 PYTHON_BIN=${PYTHON_BIN}
+DHT_PIN=${DHT_PIN}
+DHT_INTERVAL=${DHT_INTERVAL}
 EOF
 
   # snmpd (Debian-snmp/snmp) precisa ler este arquivo para o pass_persist.
@@ -424,7 +470,7 @@ After=network.target
 Type=simple
 EnvironmentFile=${ENV_FILE}
 WorkingDirectory=${INSTALL_DIR}
-ExecStart=${PYTHON_BIN} ${INSTALL_DIR}/battery_api.py --host \${HOST} --port \${PORT} --env-file ${ENV_FILE} --service-name ${SERVICE_NAME} --modbus-port \${MODBUS_PORT} --baudrate \${BAUDRATE} --modbus-timeout \${MODBUS_TIMEOUT} --discover-timeout \${DISCOVER_TIMEOUT}
+ExecStart=${PYTHON_BIN} ${INSTALL_DIR}/battery_api.py --host \${HOST} --port \${PORT} --env-file ${ENV_FILE} --service-name ${SERVICE_NAME} --modbus-port \${MODBUS_PORT} --baudrate \${BAUDRATE} --modbus-timeout \${MODBUS_TIMEOUT} --discover-timeout \${DISCOVER_TIMEOUT} --dht-pin \${DHT_PIN} --dht-interval \${DHT_INTERVAL}
 Restart=always
 RestartSec=3
 User=root
@@ -455,11 +501,13 @@ show_status() {
   echo
   echo "Teste rapido:"
   echo "  curl http://127.0.0.1:${PORT}/health"
-  echo "  UI: http://127.0.0.1:${PORT}/ui/network"
+  echo "  curl http://127.0.0.1:${PORT}/environment"
+  echo "  UI: http://127.0.0.1:${PORT}/"
   echo
   echo "Teste SNMP (requer snmp-mibs-downloader ou snmptranslate):"
   echo "  snmpwalk -v2c -c <community> localhost ${SNMP_BASE_OID}"
   echo "  snmpget  -v2c -c <community> localhost ${SNMP_BASE_OID}.1.0"
+  echo "  snmpget  -v2c -c <community> localhost ${SNMP_BASE_OID}.3.1.0 ${SNMP_BASE_OID}.3.2.0"
 }
 
 main() {

@@ -26,6 +26,10 @@ Arvore de OIDs exportados:
   BASE.2.<id>.9      tensao minima de celula em mV (gauge)
   BASE.2.<id>.10     tensao maxima de celula em mV (gauge)
   BASE.2.<id>.11     diferenca maxima entre celulas em mV (gauge)
+  BASE.3.1.0         temperatura ambiente (DHT11) em decimos de grau C, signed (integer)
+  BASE.3.2.0         umidade relativa ambiente (DHT11) em % (gauge)
+  BASE.3.3.0         status do sensor ambiente: 1 = leitura valida, 0 = sem leitura (integer)
+  BASE.3.1.0 e BASE.3.2.0 so existem enquanto houver leitura valida.
 """
 
 import os
@@ -49,6 +53,7 @@ REFRESH_INTERVAL = int(os.environ.get("BATTERY_SNMP_REFRESH", "10"))  # segundos
 DEFAULT_DISCOVER_TIMEOUT = 0.5
 BATTERY_API_URL = os.environ.get("BATTERY_API_URL", "http://127.0.0.1:8080/batteries")
 BATTERY_API_TIMEOUT = float(os.environ.get("BATTERY_API_TIMEOUT", "3"))
+ENVIRONMENT_API_URL = os.environ.get("BATTERY_ENVIRONMENT_URL", "http://127.0.0.1:8080/environment")
 
 # Indices dos campos por bateria (subOID relativo a BASE.2.<id>)
 _F_ID        = 1
@@ -62,6 +67,11 @@ _F_TEMP      = 8
 _F_CELL_MIN  = 9
 _F_CELL_MAX  = 10
 _F_CELL_DIFF = 11
+
+# Campos do sensor ambiente (subOID relativo a BASE.3)
+_E_TEMPERATURE = 1
+_E_HUMIDITY    = 2
+_E_STATUS      = 3
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +135,7 @@ class SnmpPassPersistAgent:
     # Construcao do mapa de OIDs
     # ------------------------------------------------------------------
 
-    def _build_map(self, batteries: list):
+    def _build_map(self, batteries: list, environment: dict = None):
         new_map: dict = {}
 
         def add(suffix: str, typ: str, val):
@@ -153,6 +163,15 @@ class SnmpPassPersistAgent:
             add(f"{p}.{_F_CELL_MIN}",  "gauge",   cell_min)
             add(f"{p}.{_F_CELL_MAX}",  "gauge",   cell_max)
             add(f"{p}.{_F_CELL_DIFF}", "gauge",   cell_diff)
+
+        env         = environment or {}
+        temperature = env.get("temperature")
+        humidity    = env.get("humidity")
+        env_ok      = temperature is not None and humidity is not None
+        add(f"3.{_E_STATUS}.0", "integer", 1 if env_ok else 0)
+        if env_ok:
+            add(f"3.{_E_TEMPERATURE}.0", "integer", int(round(temperature * 10)))
+            add(f"3.{_E_HUMIDITY}.0",    "gauge",   int(round(humidity)))
 
         with self._lock:
             self._oid_map     = new_map
@@ -201,6 +220,16 @@ class SnmpPassPersistAgent:
         finally:
             monitor.disconnect()
 
+    def _fetch_environment(self):
+        # Sem fallback direto: a leitura do DHT11 exige root e e feita so pela API.
+        try:
+            req = request.Request(ENVIRONMENT_API_URL, method="GET")
+            with request.urlopen(req, timeout=BATTERY_API_TIMEOUT) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
     def _background_loop(self):
         while True:
             self._refresh_once()
@@ -208,8 +237,9 @@ class SnmpPassPersistAgent:
 
     def _refresh_once(self):
         try:
-            batteries = self._fetch_batteries()
-            self._build_map(batteries)
+            batteries   = self._fetch_batteries()
+            environment = self._fetch_environment()
+            self._build_map(batteries, environment)
         except Exception:
             pass
 

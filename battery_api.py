@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import socket
+import statistics
 import subprocess
 import threading
 import time
@@ -81,6 +82,22 @@ class BatteryApiHandler(BaseHTTPRequestHandler):
         "failure_counts": {},
     }
 
+    # Sensor ambiente DHT11 (desabilitado com dht_pin vazio)
+    dht_pin = ""
+    dht_interval = 10
+    dht_median_window = 3
+
+    _env_lock = threading.Lock()
+    _env_started = False
+    _env_history = []
+    _env_data = {
+        "temperature": None,
+        "humidity": None,
+        "updated_at": None,
+        "last_error": "Sensor ainda nao lido",
+        "failures": 0,
+    }
+
     def _restart_service(self):
         """Reinicia o servico da API de forma sincrona para garantir aplicacao de config."""
         subprocess.check_call(["systemctl", "restart", self.service_name])
@@ -125,6 +142,11 @@ class BatteryApiHandler(BaseHTTPRequestHandler):
 
             if path == "/batteries":
                 payload = self._handle_batteries(params)
+                self._send_json(200, payload)
+                return
+
+            if path == "/environment":
+                payload = self._handle_environment()
                 self._send_json(200, payload)
                 return
 
@@ -280,6 +302,72 @@ class BatteryApiHandler(BaseHTTPRequestHandler):
         with cls._cache_lock:
             snapshot = copy.deepcopy(cls._cache_data)
         return snapshot
+
+    @classmethod
+    def _refresh_environment_once(cls, sensor, read_error):
+        try:
+            reading = sensor.read()
+        except read_error as exc:
+            with cls._env_lock:
+                cls._env_data["failures"] += 1
+                cls._env_data["last_error"] = str(exc)
+                if cls._env_data["failures"] > cls.cache_max_failures:
+                    cls._env_history = []
+                    cls._env_data["temperature"] = None
+                    cls._env_data["humidity"] = None
+            return
+
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with cls._env_lock:
+            # Mediana das ultimas leituras descarta frame isolado que passou no checksum
+            cls._env_history = (cls._env_history + [reading])[-max(1, cls.dht_median_window):]
+            cls._env_data = {
+                "temperature": round(statistics.median(r["temperature"] for r in cls._env_history), 1),
+                "humidity": round(statistics.median(r["humidity"] for r in cls._env_history), 1),
+                "updated_at": now,
+                "last_error": "",
+                "failures": 0,
+            }
+
+    @classmethod
+    def _environment_loop(cls):
+        try:
+            # Import tardio: falta de libgpiod nao pode derrubar a API das baterias
+            from dht_sensor import Dht11Sensor, DhtReadError
+            sensor = Dht11Sensor(pin=cls.dht_pin)
+        except Exception as exc:
+            with cls._env_lock:
+                cls._env_data["last_error"] = f"Sensor DHT11 indisponivel: {exc}"
+            return
+
+        while True:
+            try:
+                cls._refresh_environment_once(sensor, DhtReadError)
+            except Exception as exc:
+                with cls._env_lock:
+                    cls._env_data["last_error"] = str(exc)
+            time.sleep(max(2, int(cls.dht_interval)))
+
+    @classmethod
+    def start_environment_worker(cls):
+        if cls._env_started or not cls.dht_pin:
+            return
+        cls._env_started = True
+        worker = threading.Thread(target=cls._environment_loop, daemon=True)
+        worker.start()
+
+    def _handle_environment(self):
+        with self._env_lock:
+            snapshot = dict(self._env_data)
+        return {
+            "enabled": bool(self.dht_pin),
+            "sensor": "dht11",
+            "pin": self.dht_pin,
+            "temperature": snapshot["temperature"],
+            "humidity": snapshot["humidity"],
+            "cache_updated_at": snapshot["updated_at"],
+            "cache_error": snapshot["last_error"] if self.dht_pin else "Sensor desabilitado",
+        }
 
     def _handle_discover(self, params):
         start_id = int(params.get("start_id", 1))
@@ -796,6 +884,8 @@ def main():
     parser.add_argument("--modbus-timeout", type=float, default=3, help="Timeout padrao Modbus")
     parser.add_argument("--discover-timeout", type=float, default=0.5, help="Timeout padrao do discovery Modbus")
     parser.add_argument("--cache-interval", type=int, default=10, help="Intervalo de atualizacao do cache em segundos")
+    parser.add_argument("--dht-pin", default="", help="Pino do sensor DHT11, ex: PA6 (padrao: desabilitado)")
+    parser.add_argument("--dht-interval", type=int, default=10, help="Intervalo de leitura do DHT11 em segundos")
     args = parser.parse_args()
 
     BatteryApiHandler.env_file = args.env_file
@@ -807,12 +897,15 @@ def main():
     BatteryApiHandler.monitor_timeout = args.modbus_timeout
     BatteryApiHandler.discover_timeout = args.discover_timeout
     BatteryApiHandler.cache_interval = args.cache_interval
+    BatteryApiHandler.dht_pin = args.dht_pin.strip()
+    BatteryApiHandler.dht_interval = args.dht_interval
     BatteryApiHandler.start_cache_worker()
+    BatteryApiHandler.start_environment_worker()
 
     server = ThreadingHTTPServer((args.host, args.port), BatteryApiHandler)
     print(f"API iniciada em http://{args.host}:{args.port}")
-    print("Endpoints: GET/POST /discover, GET/POST /batteries, GET /health")
-    print("Config: GET/POST /config/network, UI: GET /ui/network")
+    print("Endpoints: GET/POST /discover, GET/POST /batteries, GET /environment, GET /health")
+    print("Config: GET/POST /config/network, UI: GET /")
 
     try:
         server.serve_forever()
