@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """API HTTP simples para expor leituras de baterias via Modbus."""
 
+import errno
 import argparse
 import copy
 import datetime
@@ -463,8 +464,13 @@ class BatteryApiHandler(BaseHTTPRequestHandler):
             "  version: 2",
             "  renderer: networkd",
             "  ethernets:",
-            f"    {iface}:",
+            # O ID precisa ordenar antes de 'all-eth-interfaces' (Armbian): o networkd usa
+            # o primeiro .network que casa, e o DHCP generico 'e*' venceria o IP estatico.
+            "    00-battery-api:",
+            "      match:",
+            f"        name: {iface}",
             "      dhcp4: false",
+            "      dhcp6: false",
             f"      addresses: [{ip_addr}/{prefix}]",
         ]
 
@@ -862,8 +868,16 @@ class BatteryApiHandler(BaseHTTPRequestHandler):
                     msg.className = 'msg warn';
                 }}
             }} catch (err) {{
-                msg.textContent = 'Erro: ' + err.message;
-                msg.className = 'msg warn';
+                if (err instanceof TypeError) {{
+                    // Conexao cortada: esperado quando o IP/servico muda durante o salvamento.
+                    const url = 'http://' + host + ':' + port + '/';
+                    msg.textContent = 'Conexao perdida (IP/servico mudando). Redirecionando para ' + url + ' em 15s...';
+                    msg.className = 'msg warn';
+                    setTimeout(() => {{ window.location.href = url; }}, 15000);
+                }} else {{
+                    msg.textContent = 'Erro: ' + err.message;
+                    msg.className = 'msg warn';
+                }}
             }}
         }}
     </script>
@@ -902,7 +916,14 @@ def main():
     BatteryApiHandler.start_cache_worker()
     BatteryApiHandler.start_environment_worker()
 
-    server = ThreadingHTTPServer((args.host, args.port), BatteryApiHandler)
+    try:
+        server = ThreadingHTTPServer((args.host, args.port), BatteryApiHandler)
+    except OSError as exc:
+        if exc.errno != errno.EADDRNOTAVAIL or args.host == "0.0.0.0":
+            raise
+        # IP configurado ainda nao existe na interface (rede nao aplicada/subindo): nao entrar em crash loop.
+        print(f"Host {args.host} indisponivel na interface; usando 0.0.0.0", flush=True)
+        server = ThreadingHTTPServer(("0.0.0.0", args.port), BatteryApiHandler)
     print(f"API iniciada em http://{args.host}:{args.port}")
     print("Endpoints: GET/POST /discover, GET/POST /batteries, GET /environment, GET /health")
     print("Config: GET/POST /config/network, UI: GET /")
